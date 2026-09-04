@@ -22,6 +22,8 @@ class Plugin:
     def __init__(self):
         self._lock = asyncio.Lock()
         self._capture_lock = asyncio.Lock()
+        self._settings_changed = asyncio.Event()
+        self._capture_task = None
 
     @property
     def _settings_path(self) -> Path:
@@ -79,7 +81,55 @@ class Plugin:
         output.mkdir(parents=True, exist_ok=True)
         async with self._lock:
             self._write_settings(normalised)
+        if normalised["enabled"]:
+            self._start_capture_loop()
+        else:
+            await self._stop_capture_loop()
         return normalised
+
+    def _start_capture_loop(self) -> None:
+        if self._capture_task is not None and not self._capture_task.done():
+            self._settings_changed.set()
+            return
+        self._capture_task = asyncio.create_task(self._capture_loop())
+
+    async def _stop_capture_loop(self) -> None:
+        task = self._capture_task
+        if task is None:
+            return
+        self._settings_changed.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if self._capture_task is task:
+            self._capture_task = None
+
+    async def _capture_loop(self) -> None:
+        decky.logger.info("Automatic screenshot loop started")
+        try:
+            while True:
+                self._settings_changed.clear()
+                settings = await self.get_settings()
+                if not settings["enabled"]:
+                    return
+
+                try:
+                    await asyncio.wait_for(
+                        self._settings_changed.wait(),
+                        timeout=settings["interval_ms"] / 1000,
+                    )
+                    # Settings changed; restart the wait using the new interval.
+                    continue
+                except asyncio.TimeoutError:
+                    await self.capture_screenshot()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            decky.logger.info("Automatic screenshot loop stopped")
+            if self._capture_task is asyncio.current_task():
+                self._capture_task = None
 
     def _gamescope_socket(self) -> Path:
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
@@ -151,6 +201,9 @@ class Plugin:
 
     async def _main(self):
         decky.logger.info("Deckshots loaded")
+        if (await self.get_settings())["enabled"]:
+            self._start_capture_loop()
 
     async def _unload(self):
+        await self._stop_capture_loop()
         decky.logger.info("Deckshots unloaded")

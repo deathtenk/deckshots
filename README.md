@@ -9,10 +9,12 @@ Deckshots is a small [Decky Loader](https://github.com/SteamDeckHomebrew/decky-l
 - Provides a **Capture now** button for one-off screenshots.
 - Requests screenshots from Gamescope's native control interface in SteamOS Gaming Mode.
 - Saves each captured image into a configurable folder (default: `~/Pictures/Deckshots`).
-- Continues automatic capture while the Decky panel is closed.
+- Runs the automatic capture schedule in Decky's Python backend, independent of the Quick Access panel lifecycle.
 - Persists all settings across Decky and Steam restarts.
 
 Deckshots invokes SteamOS's `gamescopectl screenshot` command against Gamescope's user-owned Wayland control socket. This asks Gamescope to write the image directly to the configured Deckshots folder, avoiding simulated input entirely. Captures use timestamped PNG names such as `deckshot_2026-09-04_18-59-04.png`. Because Gamescope writes screenshots asynchronously, Deckshots waits up to five seconds for each requested file to appear. A game must be running under Gamescope.
+
+The frontend only reads and saves settings or requests a one-off capture. Enabling automatic screenshots starts a background task in the Python backend; disabling them cancels it. The backend restores the task from persisted settings whenever Decky reloads the plugin, so closing the Quick Access panel does not interrupt the schedule.
 
 ## Permissions
 

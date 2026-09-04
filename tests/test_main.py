@@ -46,7 +46,7 @@ class PluginTests(unittest.TestCase):
     def test_save_normalises_and_persists(self):
         output = self.root / "captures"
         saved = self.run_async(self.plugin.save_settings({
-            "enabled": True,
+            "enabled": False,
             "interval_ms": 200,
             "output_path": str(output),
         }))
@@ -54,6 +54,41 @@ class PluginTests(unittest.TestCase):
         self.assertTrue(output.is_dir())
         on_disk = json.loads((self.root / "settings" / "settings.json").read_text())
         self.assertEqual(saved, on_disk)
+
+    def test_enabling_starts_and_disabling_stops_backend_loop(self):
+        async def exercise_loop():
+            settings = {
+                "enabled": True,
+                "interval_ms": 5000,
+                "output_path": str(self.root / "captures"),
+            }
+            await self.plugin.save_settings(settings)
+            task = self.plugin._capture_task
+            self.assertIsNotNone(task)
+            self.assertFalse(task.done())
+
+            await self.plugin.save_settings({**settings, "enabled": False})
+            self.assertIsNone(self.plugin._capture_task)
+            self.assertTrue(task.done())
+
+        self.run_async(exercise_loop())
+
+    def test_main_restores_enabled_backend_loop(self):
+        settings = {
+            "enabled": True,
+            "interval_ms": 5000,
+            "output_path": str(self.root / "captures"),
+        }
+        self.plugin._write_settings(settings)
+
+        async def load_and_unload():
+            await self.plugin._main()
+            self.assertIsNotNone(self.plugin._capture_task)
+            self.assertFalse(self.plugin._capture_task.done())
+            await self.plugin._unload()
+            self.assertIsNone(self.plugin._capture_task)
+
+        self.run_async(load_and_unload())
 
     def test_rejects_relative_output_path(self):
         with self.assertRaises(ValueError):

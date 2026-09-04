@@ -6,7 +6,7 @@ import {
   staticClasses,
 } from "@decky/ui";
 import { callable, definePlugin, toaster } from "@decky/api";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FaCamera } from "react-icons/fa";
 
 interface Settings {
@@ -40,7 +40,7 @@ function Content() {
     return saved;
   };
 
-  const takeScreenshot = useCallback(async () => {
+  const takeScreenshot = async () => {
     if (takingScreenshot.current) {
       console.info("Deckshots: skipped tick because a capture is already running");
       return;
@@ -63,7 +63,7 @@ function Content() {
     } finally {
       takingScreenshot.current = false;
     }
-  }, []);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -80,14 +80,6 @@ function Content() {
       });
     return () => { mounted = false; };
   }, []);
-
-  useEffect(() => {
-    if (!settings?.enabled) return;
-
-    setStatus("Automatic screenshots are active");
-    const timer = window.setInterval(takeScreenshot, settings.interval_ms);
-    return () => window.clearInterval(timer);
-  }, [settings?.enabled, settings?.interval_ms, takeScreenshot]);
 
   if (!settings) {
     return <PanelSection title="Deckshots"><PanelSectionRow>{status}</PanelSectionRow></PanelSection>;
@@ -162,6 +154,5 @@ export default definePlugin(() => ({
   titleView: <div className={staticClasses.Title}>Deckshots</div>,
   content: <Content />,
   icon: <FaCamera />,
-  alwaysRender: true,
   onDismount() { console.log("Deckshots unloaded"); },
 }));
