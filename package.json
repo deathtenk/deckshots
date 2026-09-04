@@ -1,7 +1,7 @@
 {
   "name": "deckshots",
   "version": "0.1.0",
-  "description": "Automatic Steam screenshots for Decky Loader",
+  "description": "Automatic Gamescope screenshots for Decky Loader",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
@@ -25,8 +25,5 @@
     "@decky/api": "^1.1.3",
     "react-icons": "^5.3.0",
     "tslib": "^2.7.0"
-  },
-  "pnpm": {
-    "peerDependencyRules": { "ignoreMissing": ["react", "react-dom"] }
   }
 }

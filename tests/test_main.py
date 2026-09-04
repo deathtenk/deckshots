@@ -5,9 +5,8 @@ import sys
 import tempfile
 import types
 import unittest
-from datetime import datetime as RealDatetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 class PluginTests(unittest.TestCase):
@@ -15,9 +14,15 @@ class PluginTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         fake_decky = types.SimpleNamespace(
+            DECKY_PLUGIN_DIR=str(self.root / "plugin"),
             DECKY_PLUGIN_SETTINGS_DIR=str(self.root / "settings"),
             DECKY_USER_HOME=str(self.root / "home"),
-            logger=types.SimpleNamespace(info=lambda *args: None, warning=lambda *args: None),
+            logger=types.SimpleNamespace(
+                info=lambda *args: None,
+                warning=lambda *args: None,
+                error=lambda *args: None,
+                exception=lambda *args: None,
+            ),
         )
         sys.modules["decky"] = fake_decky
         sys.modules.pop("main", None)
@@ -58,33 +63,60 @@ class PluginTests(unittest.TestCase):
                 "output_path": "relative/path",
             }))
 
-    def test_copies_screenshot_with_stable_name(self):
-        source = self.root / "steam-shot.jpg"
-        source.write_bytes(b"screenshot")
-        output = self.root / "captures"
+    def test_gamescope_socket_uses_runtime_directory(self):
+        with patch.dict(self.module.os.environ, {"XDG_RUNTIME_DIR": str(self.root / "runtime")}):
+            self.assertEqual(
+                self.plugin._gamescope_socket(),
+                self.root / "runtime" / "gamescope-0",
+            )
 
-        async def save_and_copy():
-            await self.plugin.save_settings({
-                "enabled": True,
-                "interval_ms": 5000,
-                "output_path": str(output),
-            })
-            with patch.object(self.module, "datetime") as mocked_datetime:
-                mocked_datetime.fromtimestamp.return_value = RealDatetime.strptime(
-                    "2026-09-04 12:34:56", "%Y-%m-%d %H:%M:%S"
-                )
-                return await self.plugin.copy_screenshot(str(source), 123, 1)
+    def test_requests_screenshot_through_gamescope_control(self):
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        (runtime / "gamescope-0").touch()
+        helper = self.root / "gamescopectl"
+        helper.touch()
+        destination = self.root / "capture.png"
 
-        result = self.run_async(save_and_copy())
-        destination = Path(result["path"])
-        self.assertEqual(destination.name, "deckshot_123_2026-09-04_12-34-56.jpg")
-        self.assertEqual(destination.read_bytes(), b"screenshot")
+        def run(command, **kwargs):
+            destination.write_bytes(b"png")
+            return types.SimpleNamespace(stdout="", stderr="")
 
-    def test_rejects_non_image_source(self):
-        source = self.root / "not-an-image.txt"
-        source.write_text("no")
-        with self.assertRaises(ValueError):
-            self.run_async(self.plugin.copy_screenshot(str(source), 123, 1))
+        with patch.dict(self.module.os.environ, {"XDG_RUNTIME_DIR": str(runtime)}), \
+             patch.object(self.module, "GAMESCOPECTL_PATH", str(helper)), \
+             patch.object(self.module.subprocess, "run", side_effect=run) as execute:
+            self.plugin._request_gamescope_screenshot_sync(destination)
+
+        command = execute.call_args.args[0]
+        environment = execute.call_args.kwargs["env"]
+        self.assertEqual(command, [str(helper), "screenshot", str(destination)])
+        self.assertEqual(environment["XDG_RUNTIME_DIR"], str(runtime))
+        self.assertEqual(environment["GAMESCOPE_WAYLAND_DISPLAY"], "gamescope-0")
+
+    def test_waits_for_gamescope_to_finish_writing(self):
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        (runtime / "gamescope-0").touch()
+        helper = self.root / "gamescopectl"
+        helper.touch()
+        destination = self.root / "delayed.png"
+
+        completed = types.SimpleNamespace(stdout="", stderr="")
+        with patch.dict(self.module.os.environ, {"XDG_RUNTIME_DIR": str(runtime)}), \
+             patch.object(self.module, "GAMESCOPECTL_PATH", str(helper)), \
+             patch.object(self.module.subprocess, "run", return_value=completed), \
+             patch.object(self.module.time, "sleep", side_effect=lambda _: destination.write_bytes(b"png")) as sleep:
+            self.plugin._request_gamescope_screenshot_sync(destination)
+
+        sleep.assert_called_once_with(self.module.SCREENSHOT_POLL_INTERVAL_SECONDS)
+
+    def test_capture_returns_backend_error_message(self):
+        with patch.object(
+            self.plugin, "_capture_screenshot", new=AsyncMock(side_effect=RuntimeError("specific failure"))
+        ):
+            result = self.run_async(self.plugin.capture_screenshot())
+
+        self.assertEqual(result, {"ok": False, "path": None, "error": "specific failure"})
 
 
 if __name__ == "__main__":

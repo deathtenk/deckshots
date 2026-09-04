@@ -1,7 +1,8 @@
 import asyncio
 import json
 import os
-import shutil
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -11,12 +12,16 @@ import decky
 DEFAULT_INTERVAL_MS = 5000
 MIN_INTERVAL_MS = 1000
 SETTINGS_FILE = "settings.json"
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".avif"}
+GAMESCOPECTL_PATH = "/usr/bin/gamescopectl"
+GAMESCOPE_DISPLAY = "gamescope-0"
+SCREENSHOT_WRITE_TIMEOUT_SECONDS = 5
+SCREENSHOT_POLL_INTERVAL_SECONDS = 0.05
 
 
 class Plugin:
     def __init__(self):
         self._lock = asyncio.Lock()
+        self._capture_lock = asyncio.Lock()
 
     @property
     def _settings_path(self) -> Path:
@@ -76,29 +81,73 @@ class Plugin:
             self._write_settings(normalised)
         return normalised
 
-    async def copy_screenshot(self, sourcePath: str, appId: int, createdAt: int) -> dict:
-        source = Path(sourcePath).resolve(strict=True)
-        if not source.is_file() or source.suffix.lower() not in ALLOWED_EXTENSIONS:
-            raise ValueError("Steam returned an invalid screenshot path")
+    def _gamescope_socket(self) -> Path:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        return Path(runtime_dir) / GAMESCOPE_DISPLAY
 
-        settings = await self.get_settings()
-        destination_dir = Path(settings["output_path"])
-        destination_dir.mkdir(parents=True, exist_ok=True)
+    def _request_gamescope_screenshot_sync(self, destination: Path) -> None:
+        socket_path = self._gamescope_socket()
+        if not socket_path.exists():
+            raise RuntimeError(f"Gamescope control socket is unavailable: {socket_path}")
+        if not Path(GAMESCOPECTL_PATH).is_file():
+            raise RuntimeError(f"SteamOS Gamescope control client is unavailable: {GAMESCOPECTL_PATH}")
 
+        environment = os.environ.copy()
+        environment["XDG_RUNTIME_DIR"] = str(socket_path.parent)
+        environment["GAMESCOPE_WAYLAND_DISPLAY"] = socket_path.name
         try:
-            captured = datetime.fromtimestamp(int(createdAt))
-        except (TypeError, ValueError, OSError):
-            captured = datetime.now()
-        filename = f"deckshot_{int(appId)}_{captured:%Y-%m-%d_%H-%M-%S}{source.suffix.lower()}"
-        destination = destination_dir / filename
-        counter = 1
-        while destination.exists():
-            destination = destination_dir / f"{Path(filename).stem}_{counter}{source.suffix.lower()}"
-            counter += 1
+            completed = subprocess.run(
+                [GAMESCOPECTL_PATH, "screenshot", str(destination)],
+                check=True,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError(f"gamescopectl failed: {detail or error.returncode}") from error
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("gamescopectl timed out") from error
+        # gamescopectl returns once Gamescope accepts the request. The compositor
+        # writes the PNG asynchronously, which normally takes several hundred ms.
+        deadline = time.monotonic() + SCREENSHOT_WRITE_TIMEOUT_SECONDS
+        while True:
+            try:
+                if destination.is_file() and destination.stat().st_size > 0:
+                    break
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                detail = (completed.stderr or completed.stdout or "").strip()
+                suffix = f": {detail}" if detail else ""
+                raise RuntimeError(f"Gamescope did not write the requested screenshot{suffix}")
+            time.sleep(SCREENSHOT_POLL_INTERVAL_SECONDS)
+        decky.logger.info("Gamescope wrote screenshot to %s", destination)
 
-        shutil.copy2(source, destination)
-        decky.logger.info("Copied Steam screenshot to %s", destination)
-        return {"path": str(destination)}
+    async def _capture_screenshot(self) -> str:
+        async with self._capture_lock:
+            settings = await self.get_settings()
+            destination_dir = Path(settings["output_path"])
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            captured = datetime.now()
+            destination = destination_dir / f"deckshot_{captured:%Y-%m-%d_%H-%M-%S}.png"
+            counter = 1
+            while destination.exists():
+                destination = destination_dir / f"deckshot_{captured:%Y-%m-%d_%H-%M-%S}_{counter}.png"
+                counter += 1
+            await asyncio.to_thread(self._request_gamescope_screenshot_sync, destination)
+            return str(destination)
+
+    async def capture_screenshot(self) -> dict:
+        try:
+            return {"ok": True, "path": await self._capture_screenshot(), "error": None}
+        except Exception as error:
+            message = str(error) or type(error).__name__
+            decky.logger.exception("Deckshots capture failed: %s", message)
+            return {"ok": False, "path": None, "error": message}
 
     async def _main(self):
         decky.logger.info("Deckshots loaded")

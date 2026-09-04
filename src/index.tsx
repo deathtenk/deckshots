@@ -6,7 +6,7 @@ import {
   staticClasses,
 } from "@decky/ui";
 import { callable, definePlugin, toaster } from "@decky/api";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FaCamera } from "react-icons/fa";
 
 interface Settings {
@@ -15,28 +15,22 @@ interface Settings {
   output_path: string;
 }
 
-interface CopyResult {
-  path: string;
+interface CaptureResult {
+  ok: boolean;
+  path: string | null;
+  error: string | null;
 }
 
 const getSettings = callable<[], Settings>("get_settings");
 const saveSettings = callable<[settings: Settings], Settings>("save_settings");
-const copyScreenshot = callable<
-  [sourcePath: string, appId: number, createdAt: number],
-  CopyResult
->("copy_screenshot");
+const captureScreenshot = callable<[], CaptureResult>("capture_screenshot");
 
 const MIN_INTERVAL_MS = 1000;
-const SCREENSHOT_SETTLE_MS = 1200;
-// USB HID usage ID for F12. Steam's public typings do not re-export the enum.
-const STEAM_SCREENSHOT_KEY = 69;
 
 function Content() {
   const [settings, setSettings] = useState<Settings>();
   const [intervalText, setIntervalText] = useState("5000");
   const [status, setStatus] = useState("Loading…");
-  const lastHandle = useRef<number | undefined>(undefined);
-  const lastHandleInitialised = useRef(false);
   const takingScreenshot = useRef(false);
 
   const persist = async (next: Settings) => {
@@ -45,6 +39,31 @@ function Content() {
     setIntervalText(String(saved.interval_ms));
     return saved;
   };
+
+  const takeScreenshot = useCallback(async () => {
+    if (takingScreenshot.current) {
+      console.info("Deckshots: skipped tick because a capture is already running");
+      return;
+    }
+
+    takingScreenshot.current = true;
+    setStatus("Capture attempt: requesting a Gamescope screenshot…");
+
+    try {
+      const result = await captureScreenshot();
+      if (!result.ok || !result.path) {
+        throw new Error(result.error || "The backend did not return a screenshot path");
+      }
+      setStatus(`Saved ${result.path.split("/").pop()}`);
+      console.info("Deckshots: capture saved", result.path);
+    } catch (error) {
+      console.error("Deckshots: capture failed", error);
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`Screenshot failed: ${message}`);
+    } finally {
+      takingScreenshot.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -65,45 +84,10 @@ function Content() {
   useEffect(() => {
     if (!settings?.enabled) return;
 
-    const takeScreenshot = async () => {
-      if (takingScreenshot.current) return;
-      takingScreenshot.current = true;
-      try {
-        // Establish a baseline so a failed first keypress cannot copy an old shot.
-        if (!lastHandleInitialised.current) {
-          try {
-            const previous = await SteamClient.Screenshots.GetLastScreenshotTaken();
-            lastHandle.current = previous?.hHandle;
-          } catch {
-            // A user with no screenshots may cause this call to reject.
-          }
-          lastHandleInitialised.current = true;
-        }
-        SteamClient.Input.ControllerKeyboardSetKeyState(STEAM_SCREENSHOT_KEY, true);
-        SteamClient.Input.ControllerKeyboardSetKeyState(STEAM_SCREENSHOT_KEY, false);
-        await new Promise((resolve) => window.setTimeout(resolve, SCREENSHOT_SETTLE_MS));
-
-        const shot = await SteamClient.Screenshots.GetLastScreenshotTaken();
-        if (!shot || shot.hHandle === lastHandle.current) {
-          setStatus("Steam did not report a new screenshot");
-          return;
-        }
-        lastHandle.current = shot.hHandle;
-        const sourcePath = await SteamClient.Screenshots.GetLocalScreenshotPath(shot.nAppID, shot.hHandle);
-        const result = await copyScreenshot(sourcePath, shot.nAppID, shot.nCreated);
-        setStatus(`Saved ${result.path.split("/").pop()}`);
-      } catch (error) {
-        console.error("Deckshots capture failed", error);
-        setStatus("Screenshot failed; make sure a game and Steam Overlay are running");
-      } finally {
-        takingScreenshot.current = false;
-      }
-    };
-
     setStatus("Automatic screenshots are active");
     const timer = window.setInterval(takeScreenshot, settings.interval_ms);
     return () => window.clearInterval(timer);
-  }, [settings?.enabled, settings?.interval_ms]);
+  }, [settings?.enabled, settings?.interval_ms, takeScreenshot]);
 
   if (!settings) {
     return <PanelSection title="Deckshots"><PanelSectionRow>{status}</PanelSectionRow></PanelSection>;
@@ -114,7 +98,7 @@ function Content() {
       <PanelSectionRow>
         <ToggleField
           label="Enabled"
-          description="Use Steam's screenshot hotkey at the selected interval"
+          description="Request a native Gamescope screenshot at the selected interval"
           checked={settings.enabled}
           onChange={async (enabled) => {
             try {
@@ -149,7 +133,7 @@ function Content() {
       <PanelSectionRow>
         <TextField
           label="Output folder"
-          description="Steam keeps its library copy; Deckshots puts another copy here"
+          description="Gamescope writes each Deckshots capture here"
           value={settings.output_path}
           onChange={(event) => setSettings({ ...settings, output_path: event.target.value })}
           onBlur={async () => {
@@ -164,6 +148,9 @@ function Content() {
         />
       </PanelSectionRow>
       <PanelSectionRow>
+        <button onClick={() => void takeScreenshot()}>Capture now</button>
+      </PanelSectionRow>
+      <PanelSectionRow>
         <div style={{ opacity: 0.75, fontSize: "0.9em" }}>{status}</div>
       </PanelSectionRow>
     </PanelSection>
@@ -175,5 +162,6 @@ export default definePlugin(() => ({
   titleView: <div className={staticClasses.Title}>Deckshots</div>,
   content: <Content />,
   icon: <FaCamera />,
+  alwaysRender: true,
   onDismount() { console.log("Deckshots unloaded"); },
 }));
