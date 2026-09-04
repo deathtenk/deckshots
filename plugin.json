@@ -1,0 +1,10 @@
+{
+  "name": "Deckshots",
+  "author": "Deckshots contributors",
+  "flags": ["debug"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["screenshots", "utility"],
+    "description": "Automatically take Steam screenshots at a configurable interval."
+  }
+}
